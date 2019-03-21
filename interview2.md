@@ -496,3 +496,338 @@ console.log(store.getState());
 到目前为止，redux 里面基本的 reducer，createStore，combineReducers 等方法已经实现的差不多了。但是还有一个特别重要的东西—**中间件**
 
 #### middleware 中间件的构成
+
+**什么是中间件？**
+
+> 1.  将具体业务和底层逻辑解耦的组件。
+> 2.  数据从底层到应用端的中转站。
+
+有点懵逼 😳！！！！  
+在 redux 中，中间件就是对 dispatch 的重写或者说扩展，增强 dispatch 的功能，redux 的 dispatch 是发送一个计划给 reducer 让它来改变 state 状态的，那么中间件的加入就是在 disptach 发送计划的过程中，还能让他做点其他的事情。在这个维度上做的扩展就是中间件的作用。
+
+**记录日志的中间件**  
+目前有一个需求，需要在每次修改 state 的时候，记录修改前的 state，修改后的 state，为什么修改，这个时候就需要对 dispatch 来做扩展了：
+
+```javascript
+const store = createStore(reducer);
+/*暂存之前的dispatch函数*/
+const next = store.dispatch;
+
+/**重写store.dispatch*/
+store.dispatch = action => {
+  console.log("当前state", store.getState());
+  console.log("修改原因", action);
+  //调用之前的dispatch
+  next(action);
+  console.log("修改后的state", store.getState());
+};
+```
+
+执行一下：
+
+```javascript
+store.dispatch({
+  type: "INCREMENT"
+});
+```
+
+结果：
+
+```javascript
+当前state { counter: { count: 1 } }
+action { type: 'INCREMENT' }
+2
+修改后的state { counter: { count: 2 } }
+```
+
+这样，日志的收集就已经做好了。
+
+**记录异常的中间件**  
+程序中，一般都会有记录异常原因的需求，这个时候也需要扩展一下 dispatch
+
+```javascript
+const store = createStore(reducer);
+const next = store.dispatch;
+
+store.dispatch = action => {
+  try {
+    next(action);
+  } catch (err) {
+    console.error("错误报告: ", err);
+  }
+};
+```
+
+**多个中间件功能都需要**  
+现在记录日志和异常的功能都需要，可以这么写，两个函数合起来：
+
+```javascript
+store.dispatch = action => {
+  try {
+    console.log("当前state", store.getState());
+    console.log("修改原因", action);
+    //调用之前的dispatch
+    next(action);
+    console.log("修改后的state", store.getState());
+  } catch (err) {
+    console.error("错误报告: ", err);
+  }
+};
+```
+
+完美，漂亮，多么美丽 😄😄😄😄！！！
+
+这个时候 SB 产品跑过来说，我需要在点击某个按钮的时候，dispatch 的时候，看看当前的时间时间是多少，那就继续改呗，5 个需求改五次原有的 dispatch 函数 😳，这样后面 dispatch 会变得特别庞大，维护起来特别困难，所以这样是不行的！
+
+那就采取一个来实现多个中间件融合的方式：
+
+> 第一步.把打印日志的中间件提取出来叫做 loggerMiddleware
+
+```javascript
+const store = createStore(reducer);
+const next = store.dispatch;
+
+/**提取*/
+const loggerMiddleware = action => {
+  console.log("this state", store.getState());
+  console.log("action", action);
+  next(action);
+  console.log("next state", store.getState());
+};
+/**重写*/
+store.dispatch = action => {
+  try {
+    loggerMiddleware(action);
+  } catch (err) {
+    console.error("错误报告: ", err);
+  }
+};
+```
+
+> 第二步.把错误异常的中间件提取出来
+
+```javascript
+const exceptionMiddleware = action => {
+  try {
+    /*next(action)*/
+    loggerMiddleware(action);
+  } catch (err) {
+    console.error("错误报告: ", err);
+  }
+};
+store.dispatch = exceptionMiddleware;
+```
+
+> 第三步，此时 exceptionMiddleware 错误异常的中间件里面写定了 loggerMiddleware 日志处理的中间件，这肯定是不行，需要变成一个动态的中间件，我们通过函数传参来解决这个问题
+
+```javascript
+const exceptionMiddleware = next => action => {
+  try {
+    /*loggerMiddleware(action);*/
+    next(action);
+  } catch (err) {
+    console.error("错误报告: ", err);
+  }
+};
+/*loggerMiddleware 变成参数传进去*/
+store.dispatch = exceptionMiddleware(loggerMiddleware);
+```
+
+> 第四步，loggerMiddleware 里面的 next 现在是等于 store.dispatch，导致 loggerMiddleware 里面无法扩展别的中间件了！我们这里把 next 写成动态的，通过函数来传递。
+
+```javascript
+const loggerMiddleware = next => action => {
+  console.log("this state", store.getState());
+  console.log("action", action);
+  next(action);
+  console.log("next state", store.getState());
+};
+```
+
+此时，我们摸索出来了一个比较不错的中间件合作模式：
+
+```javascript
+const store = createStore(reducer);
+const next = store.dispatch;
+
+const loggerMiddleware = next => action => {
+  console.log("this state", store.getState());
+  console.log("action", action);
+  next(action);
+  console.log("next state", store.getState());
+};
+
+const exceptionMiddleware = next => action => {
+  try {
+    next(action);
+  } catch (err) {
+    console.error("错误报告: ", err);
+  }
+};
+
+/**通过一层层的执行*/
+store.dispatch = exceptionMiddleware(loggerMiddleware(next));
+```
+
+但是现在会有个问题，因为中间件很多都是第三方扩展的，属于外部文件，比如 loggerMiddleware 中包含了变量 store，此时外部文件是没有这个变量的，所以也需要把 store 作为参数传进来，这样中间件的模式就变成了这样：
+
+```javascript
+const store = createStore(reducer);
+const next = store.dispatch;
+
+const loggerMiddleware = store => next => action => {
+  console.log("this state", store.getState());
+  console.log("action", action);
+  next(action);
+  console.log("next state", store.getState());
+};
+
+const exceptionMiddleware = store => next => action => {
+  try {
+    next(action);
+  } catch (err) {
+    console.error("错误报告: ", err);
+  }
+};
+
+/**传入store，生成包含了store变量的中间件 */
+const logger = loggerMiddleware(store);
+const exception = exceptionMiddleware(store);
+/**依次调用，传入中间件*/
+store.dispatch = exception(logger(next));
+```
+
+到这里为止，我们真正的实现了两个可以独立的中间件啦！  
+但是要记住上面，咱们还有一个产品提出的需求，在 dispatch 的时候，打印日志前，记录时间，我们来实现一下：
+
+```javascript
+const timeMiddleware = store => next => action => {
+  console.log("time", new Date().getTime());
+  next(action);
+};
+```
+
+如同上面的方法，调用一下试试
+
+```javascript
+const time = timeMiddleware(store);
+store.dispatch = exception(time(logger(next)));
+```
+
+#### 优化中间件的使用方式
+
+上面实现的中间件使用方式不是特别友好，需要一层一层传入执行：
+
+```javascript
+import loggerMiddleware from "./middlewares/loggerMiddleware";
+import exceptionMiddleware from "./middlewares/exceptionMiddleware";
+import timeMiddleware from "./middlewares/timeMiddleware";
+
+const store = createStore(reducer);
+const next = store.dispatch;
+
+const logger = loggerMiddleware(store);
+const exception = exceptionMiddleware(store);
+const time = timeMiddleware(store);
+//层层传递执行
+store.dispatch = exception(time(logger(next)));
+```
+
+既然知道了三个中间件，其他的细节是不是可以封装起来呢？咱们希望使用的时候是这样的：
+
+```javascript
+/*传入多个中间件，接收旧的 createStore，返回新的 createStore*/
+const newCreateStore = applyMiddleware(
+  exceptionMiddleware,
+  timeMiddleware,
+  loggerMiddleware
+)(createStore);
+
+/*返回了一个 dispatch 被重写过的 store*/
+const store = newCreateStore(reducer);
+```
+
+内部封装逻辑在 applyMiddleware 中实现：
+
+```javascript
+/**接受所有的中间件*/
+const applyMiddleware = function(...middlewares) {
+  /*返回一个重写createStore的方法，接受之前的createStore*/
+  return function rewriteCreateStoreFunc(oldCreateStore) {
+    /*返回重写后新的 createStore*/
+    return function newCreateStore(reducer, initState) {
+      /*用之前的createStore生成store*/
+      const store = oldCreateStore(reducer, initState);
+
+      /*
+       * 给每个 middleware 传下store，
+       * 相当于 const logger = loggerMiddleware(store);
+       */
+
+      /*
+       * 返回传入store执行之后的所有中间件
+       * const chain = [exception, time, logger]
+       */
+      const chain = middlewares.map(middleware => middleware(store));
+
+      let dispatch = store.dispatch;
+      /* 实现 exception(time((logger(dispatch))))*/
+      chain.reverse().map(middleware => {
+        dispatch = middleware(dispatch);
+      });
+
+      /*2. 重写 dispatch*/
+      store.dispatch = dispatch;
+      return store;
+    };
+  };
+};
+```
+
+基于这一步中间件合作改造的工作已经差不多了，但是还有一些小问题，有了两个 createStore：
+
+```javascript
+/*没有中间件的 createStore*/
+import { createStore } from "./redux";
+const store = createStore(reducer, initState);
+```
+
+---
+
+```javascript
+/*有中间件的 createStore*/
+const rewriteCreateStoreFunc = applyMiddleware(
+  exceptionMiddleware,
+  timeMiddleware,
+  loggerMiddleware
+);
+const newCreateStore = rewriteCreateStoreFunc(createStore);
+const store = newCreateStore(reducer, initState);
+
+//这里会有newCreateStore和createStore这两个，这样对于用户而言，是不好区分的。
+```
+
+这里在修改一下 createStore：
+
+```javascript
+const createStore = (reducer, initState, rewriteCreateStoreFunc) => {
+  /*如果有 rewriteCreateStoreFunc，那就采用新的 createStore */
+  if (rewriteCreateStoreFunc) {
+    const newCreateStore = rewriteCreateStoreFunc(createStore);
+    return newCreateStore(reducer, initState);
+  }
+  /*否则按照正常的流程走*/
+};
+```
+
+最终的用法：
+
+```javascript
+const rewriteCreateStoreFunc = applyMiddleware(
+  exceptionMiddleware,
+  timeMiddleware,
+  loggerMiddleware
+);
+
+const store = createStore(reducer, initState, rewriteCreateStoreFunc);
+```
