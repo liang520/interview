@@ -831,3 +831,263 @@ const rewriteCreateStoreFunc = applyMiddleware(
 
 const store = createStore(reducer, initState, rewriteCreateStoreFunc);
 ```
+
+#### 退订事件注册
+
+修改一下 subscribe,增加退订的方法
+
+```javascript
+function subscribe(listener) {
+  listeners.push(listener);
+  return function unsubscribe() {
+    const index = listeners.indexOf(listener);
+    listeners.splice(index, 1);
+  };
+}
+```
+
+使用：
+
+```javascript
+const unsubscribe = store.subscribe(() => {
+  let state = store.getState();
+  console.log(state.counter.count);
+});
+/*退订*/
+unsubscribe();
+```
+
+#### 目前中间件可以拿到我们完成的 store
+
+到目前，applyMiddleware 方法中的 store 可以被中间件拿到，我们只把 getState 方法传递给中间件就好。
+修改下 applyMiddleware 中给中间件传的 store：
+
+```javascript
+/*
+ * 以前是这样的：
+ * const chain = middlewares.map(middleware => middleware(store));
+ */
+const onlyGetStore = { getState: store.getState };
+const chain = middlewares.map(middleware => middleware(onlyGetStore));
+```
+
+**compose**  
+我们的 applyMiddleware 中，把 [A, B, C] 转换成 A(B(C(next)))，是这样实现的
+
+```javascript
+const chain = [A, B, C];
+let dispatch = store.dispatch;
+chain.reverse().map(middleware => {
+  dispatch = middleware(dispatch);
+});
+```
+
+其实在 redux 中提供了一个 compose 方法，可以这样做：
+
+```javascript
+const chain = [A, B, C];
+dispatch = compose(...chain)(store.dispatch);
+```
+
+它的内部实现如下：
+
+```javascript
+export default function compose(...funcs) {
+  if (funcs.length === 1) {
+    return funcs[0];
+  }
+  return funcs.reduce((a, b) => (...args) => a(b(...args)));
+}
+```
+
+这个函数属于函数式编程中的组合的概念，有兴趣，我们后面单开一节，讲讲函数式编程。
+
+#### 省略 initState
+
+在 redux 中有时候 createStore 的时候，没有传 initState，允许我们这么写：
+
+```javascript
+const store = createStore(reducer, rewriteCreateStoreFunc);
+```
+
+它的内部做了这么一层实现：
+
+```javascript
+function craeteStore(reducer, initState, rewriteCreateStoreFunc) {
+  if (typeof initState === "function") {
+    rewriteCreateStoreFunc = initState;
+    initState = undefined;
+  }
+  /**其他代码*/
+}
+```
+
+#### 按需加载 reducer
+
+reducer 做了拆分之后，和 UI 组件是一一对应的，在做按需加载的时候，reducer 也可以和组件一起做按需加载，用新的 reducer 替换老的 reducer：
+
+```javascript
+const createStore = function(reducer, initState) {
+  function replaceReducer(nextReducer) {
+    reducer = nextReducer;
+    /*刷新一遍 state 的值，新来的 reducer 把自己的默认状态放到 state 树上去*/
+    dispatch({ type: Symbol() });
+  }
+  //其他代码
+  return {
+    ...replaceReducer
+  };
+};
+```
+
+使用的例子：
+
+```javascript
+const reducer = combineReducers({
+  counter: counterReducer
+});
+const store = createStore(reducer);
+
+/*生成新的reducer*/
+const nextReducer = combineReducers({
+  counter: counterReducer,
+  info: infoReducer
+});
+/*replaceReducer*/
+store.replaceReducer(nextReducer);
+```
+
+#### bindActionCreators
+
+bindActionCreators 一般只有在 react-redux 的 connect 实现中用到。
+
+他是做什么的？他通过闭包，把 dispatch 和 actionCreator 隐藏起来，让其他地方感知不到 redux 的存在。
+
+我们通过普通的方式来 隐藏 dispatch 和 actionCreator 试试，注意最后两行代码
+
+```javascript
+const reducer = combineReducers({
+  counter: counterReducer,
+  info: infoReducer
+});
+const store = createStore(reducer);
+
+/*返回 action 的函数就叫 actionCreator*/
+function increment() {
+  return {
+    type: "INCREMENT"
+  };
+}
+
+function setName(name) {
+  return {
+    type: "SET_NAME",
+    name: name
+  };
+}
+
+const actions = {
+  increment: function() {
+    return store.dispatch(increment.apply(this, arguments));
+  },
+  setName: function() {
+    return store.dispatch(setName.apply(this, arguments));
+  }
+};
+/*注意：我们可以把 actions 传到任何地方去*/
+/*其他地方在实现自增的时候，根本不知道 dispatch，actionCreator等细节*/
+actions.increment(); /*自增*/
+actions.setName("玄说前端"); /*修改 info.name*/
+```
+
+actions 生成的时候，公共代码，可以提取一下：
+
+```javascript
+const actions = bindActionCreators({ increment, setName }, store.dispatch);
+```
+
+bindActionCreators 实现：
+
+```javascript
+/*通过闭包隐藏了 actionCreator 和 dispatch,核心代码*/
+function bindActionCreator(actionCreator, dispatch) {
+  return function() {
+    return dispatch(actionCreator.apply(this, arguments));
+  };
+}
+
+/* actionCreators 必须是 function 或者 object */
+export default function bindActionCreators(actionCreators, dispatch) {
+  if (typeof actionCreators === "function") {
+    return bindActionCreator(actionCreators, dispatch);
+  }
+
+  if (typeof actionCreators !== "object" || actionCreators === null) {
+    throw new Error();
+  }
+  const keys = Object.keys(actionCreators);
+  const boundActionCreators = {};
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const actionCreator = actionCreators[key];
+    if (typeof actionCreator === "function") {
+      boundActionCreators[key] = bindActionCreator(actionCreator, dispatch);
+    }
+  }
+  return boundActionCreators;
+}
+```
+
+---
+
+到目前为止基本的 redux 功能，都已实现，由于版本迭代，不一定现有最新版本实现一致，但是最主要的思想和实现都是差不多的。
+
+#### 源码总结
+
+把关键的名词提取出来：
+
+- createStore
+
+  > 创建 store 对象，包含 getState, dispatch, subscribe, replaceReducer
+
+- reducer
+
+  > reducer 是一个计划函数，接收旧的 state 和 action，生成新的 state
+
+- action
+
+  > action 是一个对象，必须包含 type 字段
+
+- dispatch
+
+> dispatch( action ) 触发 action，生成新的 state
+
+- subscribe
+
+> 实现订阅功能，每次触发 dispatch 的时候，会执行订阅函数
+
+- combineReducers
+
+> 多 reducer 合并成一个 reducer
+
+- replaceReducer
+
+> 替换 reducer 函数
+
+- middleware
+
+> 扩展 dispatch 函数！
+
+这是基本的名词都在这里！
+
+#### 数据流程
+
+redux 的整体数据流如下图：
+![](./21.jpg)
+更有味道的：
+![](./12.png)
+
+当明白了 redux 之后，我们来看一下整体加上 view 之后的流程：
+![](./123.png)
+
+到目前为止，再去看看咱们上一篇文章中的一些问题，是不是又不一样了， 下一篇文章咱们将会所有的问题全部详解一遍
